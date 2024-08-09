@@ -4,6 +4,7 @@ from tqdm import tqdm
 
 # Constants
 SERVER_HOST = '192.168.39.85'
+# SERVER_HOST = '192.168.0.100'
 SERVER_PORT = 5001
 BUFFER_SIZE = 4096
 SEPARATOR = "<SEPARATOR>"
