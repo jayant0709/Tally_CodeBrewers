@@ -11,31 +11,40 @@ SEPARATOR = "<SEPARATOR>"
 # Create a socket instance
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-# Connect to the server
-client_socket.connect((SERVER_HOST, SERVER_PORT))
+try:
+    # Connect to the server
+    client_socket.connect((SERVER_HOST, SERVER_PORT))
 
-# Receive the filename and filesize from the server
-received = client_socket.recv(BUFFER_SIZE).decode()
-filename, filesize = received.split(SEPARATOR)
-filename = os.path.basename(filename)
-filesize = int(filesize)
+    # Receive the number of files first
+    num_files = int(client_socket.recv(BUFFER_SIZE).decode())
 
-# Initialize the progress bar
-progress = tqdm(range(filesize), f"Receiving {filename}", unit="B", unit_scale=True, unit_divisor=1024)
+    for _ in range(num_files):
+        # Receive the filename and filesize from the server
+        received = client_socket.recv(BUFFER_SIZE).decode()
+        filename, filesize = received.split(SEPARATOR)
+        filename = os.path.basename(filename)
+        filesize = int(filesize)
 
-# Open the file for writing in binary mode
-with open(filename, "wb") as f:
-    while True:
-        # Read the bytes from the socket
-        bytes_read = client_socket.recv(BUFFER_SIZE)
-        if not bytes_read:
-            break
-        # Write the received bytes to the file
-        f.write(bytes_read)
-        # Update the progress bar
-        progress.update(len(bytes_read))
+        # Send acknowledgment to the server
+        client_socket.send("ACK".encode())
 
-# Close the progress bar and the socket
-progress.close()
-print(f"[+] File {filename} received successfully.")
-client_socket.close()
+        # Initialize the progress bar
+        progress = tqdm(range(filesize), f"Receiving {filename}", unit="B", unit_scale=True, unit_divisor=1024)
+
+        # Open the file for writing in binary mode
+        with open(filename, "wb") as f:
+            total_bytes_received = 0
+            while total_bytes_received < filesize:
+                bytes_read = client_socket.recv(BUFFER_SIZE)
+                if not bytes_read:
+                    break
+                f.write(bytes_read)
+                total_bytes_received += len(bytes_read)
+                progress.update(len(bytes_read))
+
+        progress.close()
+        print(f"[+] File {filename} received successfully.")
+except Exception as e:
+    print(f"[-] Error: {str(e)}")
+finally:
+    client_socket.close()
