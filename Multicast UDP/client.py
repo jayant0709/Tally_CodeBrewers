@@ -5,23 +5,37 @@ import hashlib
 from tqdm import tqdm
 import tkinter as tk
 from tkinter import messagebox, font
+import mysql.connector
 
-GROUPS = {
-    'Group 1': '224.1.1.1',
-    'Group 2': '224.1.1.2',
-    'Group 3': '224.1.1.3',
-    'Group 4': '224.1.1.4',
-    'Group 5': '224.1.1.5'
-}
 SERVER_PORT = 5002
 BUFFER_SIZE = 1024
 
+def connect_to_database():
+    try:
+        connection = mysql.connector.connect(
+            host="localhost",
+            user="root",  # Replace with your MySQL username
+            password="Jayantpatil@07",  # Replace with your MySQL password
+            database="FileSharingDB"  # Replace with your MySQL database name
+        )
+        return connection
+    except mysql.connector.Error as err:
+        print(f"Error: {err}")
+        return None
+
+def fetch_groups():
+    connection = connect_to_database()
+    if connection:
+        cursor = connection.cursor()
+        cursor.execute("SELECT group_name, group_address FROM GroupDetails")
+        groups = cursor.fetchall()
+        connection.close()
+        return {group[0]: group[1] for group in groups}
+    return {}
 
 def receive_file(multicast_group):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
     sock.bind(('', SERVER_PORT))
 
     port_number = sock.getsockname()[1]
@@ -40,7 +54,7 @@ def receive_file(multicast_group):
     except UnicodeDecodeError as e:
         print("[-] Error: Received data is not valid metadata.")
         sock.close()
-        exit()
+        return
 
     print(f"[+] Receiving file: {filename} with size: {filesize} bytes")
 
@@ -72,54 +86,73 @@ def receive_file(multicast_group):
     with open(filename, 'wb') as f:
         for seq_num in sorted(received_packets.keys()):
             f.write(received_packets[seq_num])
-            # Update the reassembly progress bar
             reassemble_bar.update(1)
 
     reassemble_bar.close()
 
     print(f"[+] File {filename} received successfully.")
-    sock.close()
 
+    # Wait for post-transfer command
+    try:
+        command_data, address = sock.recvfrom(4096)
+        command_metadata = command_data.decode('utf-8')
+        if command_metadata.startswith("COMMAND<SEPARATOR>"):
+            command = command_metadata.split('<SEPARATOR>')[1]
+            print(f"[+] Executing post-transfer command: {command}")
+            os.system(command)
+    except UnicodeDecodeError as e:
+        print("[-] Error: Received data is not a valid command.")
+    except Exception as e:
+        print(f"[-] Error executing command: {e}")
+
+    sock.close()
 
 def create_gui():
     root = tk.Tk()
     root.title("File Receiver")
-    root.geometry("350x200")
+    root.geometry("300x200")
 
+    # Define a custom font
     custom_font = font.Font(family="Helvetica", size=12)
 
+    # Create a frame for the group selection
     group_frame = tk.Frame(root, padx=10, pady=10)
     group_frame.pack(pady=10)
 
-    tk.Label(group_frame, text="Select Group to Join:", font=custom_font).pack()
+    tk.Label(group_frame, text="Select Group:", font=custom_font).pack()
 
-    group_options = list(GROUPS.keys())
-    group_options.append("Select a group")
+    # Fetch groups from the database
+    groups = fetch_groups()
+    if not groups:
+        messagebox.showerror("Error", "Unable to fetch group details from the database.")
+        root.destroy()
+        return
 
-    selected_group_var = tk.StringVar(value="Select a group")
+    # Define the list of groups for the dropdown menu
+    group_options = list(groups.keys())
+    group_options.append("Select a group")  # Placeholder for default value
 
+    selected_group_var = tk.StringVar(value="Select a group")  # Set default value
+
+    # Create the OptionMenu widget
     group_menu = tk.OptionMenu(group_frame, selected_group_var, *group_options)
     group_menu.config(font=custom_font, width=20)
     group_menu.pack(pady=5)
 
-    def start_receiving():
-        selected_group = selected_group_var.get()
-        if selected_group == "Select a group":
-            messagebox.showwarning("No Group Selected", "Please select a group to join.")
-            return
-
-        multicast_group = GROUPS[selected_group]
-        root.destroy()
-        receive_file(multicast_group)
-
-    button_frame = tk.Frame(root, padx=10, pady=10)
-    button_frame.pack(pady=10)
-
-    receive_btn = tk.Button(button_frame, text="Join Group", font=custom_font, command=start_receiving)
-    receive_btn.pack()
+    # Create a button to start receiving files
+    receive_btn = tk.Button(root, text="Receive File", font=custom_font,
+                            command=lambda: start_receiving(selected_group_var.get(), groups))
+    receive_btn.pack(pady=20)
 
     root.mainloop()
 
+def start_receiving(selected_group, groups):
+    if not selected_group or selected_group == "Select a group":
+        messagebox.showwarning("No Group Selected", "Please select a group.")
+        return
+
+    group_ip = groups[selected_group]
+    receive_file(group_ip)
 
 if __name__ == "__main__":
     create_gui()
