@@ -6,6 +6,16 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, font
 import mysql.connector
+import uuid
+import tqdm
+
+# Server and networking settings
+SERVER_PORT = 5002
+BUFFER_SIZE = 1024
+TTL = 1  # Time-to-live for multicast packets
+ACK_TIMEOUT = 1  # Time to wait for an acknowledgment before retransmitting
+WINDOW_SIZE = 5  # Number of packets sent before waiting for ACKs
+
 
 # Database connection
 def connect_to_database():
@@ -21,15 +31,122 @@ def connect_to_database():
         print(f"Error: {err}")
         return None
 
-# Server and networking settings
-SERVER_PORT = 5002
-BUFFER_SIZE = 1024
-TTL = 1  # Time-to-live for multicast packets
-ACK_TIMEOUT = 1  # Time to wait for an acknowledgment before retransmitting
-WINDOW_SIZE = 5  # Number of packets sent before waiting for ACKs
 
+def send_file_to_client(sock, packet, group_ip):
+    sock.sendto(packet, (group_ip, SERVER_PORT))
+
+
+# Function to create a table for a new group
+def create_group_table(group_name):
+    connection = connect_to_database()
+    if connection:
+        cursor = connection.cursor()
+        try:
+            table_name = f"{group_name.replace(' ', '_')}_users"
+            cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} (user_id VARCHAR(255) PRIMARY KEY)")
+            connection.commit()
+            print(f"Table '{table_name}' created or already exists.")
+        except mysql.connector.Error as err:
+            print(f"Failed to create table '{table_name}': {err}")
+        finally:
+            connection.close()
+
+
+# Fetch groups from the database
+def fetch_groups():
+    connection = connect_to_database()
+    if connection:
+        cursor = connection.cursor()
+        cursor.execute("SELECT group_name, group_address FROM GroupDetails")
+        groups = cursor.fetchall()
+        connection.close()
+        return {group[0]: group[1] for group in groups}
+    return {}
+
+
+# Function to add a user to the group table
+def add_user_to_group(user_id, group_name):
+    connection = connect_to_database()
+    if connection:
+        cursor = connection.cursor()
+        insert_query = f"INSERT INTO {group_name.replace(' ', '_')}_users (user_id) VALUES (%s)"
+        cursor.execute(insert_query, (user_id,))
+        connection.commit()
+        connection.close()
+
+
+# Function to check if a user_id is valid for a group
+def is_user_id_valid(user_id, group_name):
+    connection = connect_to_database()
+    if connection:
+        cursor = connection.cursor()
+        check_query = f"SELECT COUNT(*) FROM {group_name.replace(' ', '_')}_users WHERE user_id = %s"
+        cursor.execute(check_query, (user_id,))
+        result = cursor.fetchone()[0]
+        connection.close()
+        return result > 0
+    return False
+
+
+def handle_user_requests():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # sock.bind(('0.0.0.0', SERVER_PORT))
+    sock.bind(('0.0.0.0', 5001))
+
+    while True:
+        try:
+            data, address = sock.recvfrom(1024)
+            request = data.decode('utf-8')
+            username = ""
+            received_list = []
+            received_list = request.split(':')
+            action = ""
+            group_name = ""
+            # action, username, group_name = request.split(':')
+            if (len(received_list) == 3):
+                action = received_list[0]
+                username = received_list[1]
+                group_name = received_list[2]
+            else:
+                action = received_list[0]
+                group_name = received_list[1]
+
+            # print(action)
+            # print(username)
+            # print(group_name)
+
+            if action == "JOIN":
+                # Simulate approval process (you can add more logic here)
+                approve = messagebox.askyesno("Group Join Request",
+                                              f"Approve user '{username}' to join '{group_name}'?")
+
+                if approve:
+                    create_group_table(group_name)  # Ensure the group's table exists
+                    user_id = str(uuid.uuid4())
+                    add_user_to_group(user_id, group_name)
+                    response = f"APPROVED:{user_id}"
+                else:
+                    response = "DENIED"
+
+                sock.sendto(response.encode('utf-8'), address)
+
+            elif action == "VALIDATE":
+                user_id = username
+                group_name = group_name
+                if is_user_id_valid(user_id, group_name):
+                    response = "VALID"
+                else:
+                    response = "INVALID"
+                sock.sendto(response.encode('utf-8'), address)
+
+        except Exception as e:
+            print(f"Error occurred: {e}")
+
+
+# Function to send files to the multicast group
 def send_file(filename, group_ip, post_transfer_command=None):
     filesize = os.path.getsize(filename)
+    num_packets = (filesize + BUFFER_SIZE - 1) // BUFFER_SIZE
 
     # Create the UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -40,10 +157,13 @@ def send_file(filename, group_ip, post_transfer_command=None):
     file_info = f"{os.path.basename(filename)}<SEPARATOR>{filesize}"
     sock.sendto(file_info.encode('utf-8'), (group_ip, SERVER_PORT))
 
+    # sock.sendto(file_info.encode('utf-8'), (group_ip, 5001))
+
     # Sending thread
     def send_packets():
         sequence_number = 0
         sent_packets = {}
+        progress_bar = tqdm.tqdm(total=num_packets, desc=f"Sending {filename}")
 
         with open(filename, 'rb') as f:
             while True:
@@ -59,6 +179,13 @@ def send_file(filename, group_ip, post_transfer_command=None):
                     window_packets.append(packet)
                     sequence_number += 1
 
+                # Send packets in the current window using threading
+                # threads = []
+                # for packet in window_packets:
+                #     thread = threading.Thread(target=send_file_to_client, args=(sock, packet, group_ip))
+                #     thread.start()
+                #     threads.append(thread)
+
                 # Send packets in the current window
                 for packet in window_packets:
                     sock.sendto(packet, (group_ip, SERVER_PORT))
@@ -71,12 +198,17 @@ def send_file(filename, group_ip, post_transfer_command=None):
                         ack_num = struct.unpack('I', ack[:4])[0]
                         if ack_num in sent_packets:
                             del sent_packets[ack_num]
+                            progress_bar.update(1)  # Update the progress bar
                     except socket.timeout:
                         print(f"[-] No ACK for packet {seq_num}, retransmitting...")
+                        # for thread in threads:
+                        #     thread.join()  # Ensure all threads have finished before retransmitting
                         sock.sendto(packet, (group_ip, SERVER_PORT))
 
                 if not bytes_read:
                     break
+
+        progress_bar.close()
 
         # Send post-transfer command if provided
         if post_transfer_command:
@@ -88,6 +220,8 @@ def send_file(filename, group_ip, post_transfer_command=None):
 
     threading.Thread(target=send_packets).start()
 
+
+# Function to start sending files to the selected group
 def start_sending(selected_files, selected_group, post_transfer_command):
     if not selected_files:
         messagebox.showwarning("No Files Selected", "Please select at least one file.")
@@ -110,10 +244,14 @@ def start_sending(selected_files, selected_group, post_transfer_command):
             messagebox.showerror("Error", "Selected group not found in the database.")
         connection.close()
 
+
+# Function to open the file dialog and select files
 def open_file_dialog():
     files = filedialog.askopenfilenames(title="Select Files")
     return files
 
+
+# Function to create a new group
 def create_new_group():
     group_name = simpledialog.askstring("Input", "Enter group name:")
     group_address = simpledialog.askstring("Input", "Enter group address (e.g., 224.1.1.6):")
@@ -126,10 +264,13 @@ def create_new_group():
             connection.commit()
             connection.close()
             update_group_menu()  # Refresh the dropdown menu
+            create_group_table(group_name)
             messagebox.showinfo("Success", "Group created successfully!")
     else:
         messagebox.showwarning("Input Error", "Please enter both group name and address.")
 
+
+# Function to update the group dropdown menu
 def update_group_menu():
     connection = connect_to_database()
     if connection:
@@ -141,9 +282,12 @@ def update_group_menu():
             group_menu['menu'].add_command(label=group[0], command=tk._setit(selected_group_var, group[0]))
         connection.close()
 
+
+# Function to create the GUI
 def create_gui():
     global group_menu  # Declare as global to use in update_group_menu()
     global selected_group_var  # Declare as global to use in update_group_menu()
+    global progress_bar
 
     root = tk.Tk()
     root.title("File Sharing System")
@@ -195,6 +339,10 @@ def create_gui():
     command_entry = tk.Entry(command_frame, font=custom_font, width=40)
     command_entry.pack(pady=5)
 
+    # Progress bar
+    progress_frame = tk.Frame(root, padx=10, pady=10)
+    progress_frame.pack(pady=10)
+
     # Button to start sending files
     send_btn = tk.Button(root, text="Send Files", font=custom_font,
                          command=lambda: start_sending(selected_files, selected_group_var.get(), command_entry.get()))
@@ -202,5 +350,7 @@ def create_gui():
 
     root.mainloop()
 
+
 if __name__ == "__main__":
+    threading.Thread(target=handle_user_requests).start()  # Start the thread to handle user requests
     create_gui()
