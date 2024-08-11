@@ -8,6 +8,8 @@ from tkinter import filedialog, messagebox, simpledialog, font
 import mysql.connector
 import uuid
 import tqdm
+import time
+from datetime import datetime, timedelta
 
 # Server and networking settings
 SERVER_PORT = 5002
@@ -126,6 +128,7 @@ def handle_user_requests():
                     add_user_to_group(user_id, group_name)
                     response = f"APPROVED:{user_id}"
                     add_active_user(user_id, group_name)
+                    # send_previous_files(group_name, user_id)
                 else:
                     response = "DENIED"
 
@@ -137,10 +140,23 @@ def handle_user_requests():
                 if is_user_id_valid(user_id, group_name):
                     response = "VALID"
                     add_active_user(user_id, group_name)
-
+                    # send_previous_files(group_name, user_id)
                 else:
                     response = "INVALID"
                 sock.sendto(response.encode('utf-8'), address)
+
+            elif action == "UPDATE":
+                user_id = username
+                group_name = group_name
+                # response = ""
+                if update_required(group_name, user_id):
+                    response = "UPDATE NEEDED"
+                else:
+                    response = "UPDATED"
+
+                sock.sendto(response.encode('utf-8'), address)
+                time.sleep(1)
+                send_previous_files(group_name, user_id)
 
         except Exception as e:
             print(f"Error occurred: {e}")
@@ -172,11 +188,17 @@ def send_file(filename, group_ip, user_ids, post_transfer_command=None):
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, TTL)
     sock.settimeout(ACK_TIMEOUT)
 
-    # Create the acknowledgment file if it doesn't exist
-    ack_file_path = f"{filename}_acknowledgments.txt"
+    # Paths to save the acknowledgment file and files sent file in the current working directory
+    ack_file_path = os.path.join(os.getcwd(), f"{filename}_acknowledgments.txt")
+
+    # Create acknowledgment and files sent files if they don't exist
     if not os.path.exists(ack_file_path):
         with open(ack_file_path, 'w') as ack_file:
             ack_file.write("")
+
+    # Check existing acknowledgments to avoid resending the file
+    with open(ack_file_path, 'r') as ack_file:
+        acknowledged_users = set(line.strip() for line in ack_file.readlines()[1:])
 
     # Send the file details first
     file_info = f"{os.path.basename(filename)}<SEPARATOR>{filesize}"
@@ -184,6 +206,11 @@ def send_file(filename, group_ip, user_ids, post_transfer_command=None):
 
     # Sending thread for each user_id
     def send_packets(user_id):
+
+        if user_id in acknowledged_users:
+            print(f"[+] Skipping user {user_id} as the file {filename} has already been acknowledged.")
+            return
+
         sequence_number = 0
         sent_packets = {}
         progress_bar = tqdm.tqdm(total=num_packets, desc=f"Sending {filename} to {user_id}")
@@ -236,13 +263,15 @@ def send_file(filename, group_ip, user_ids, post_transfer_command=None):
                 if ack_message.startswith("ACK_COMPLETE<SEPARATOR>"):
                     ack_user_id, ack_filename = ack_message.split('<SEPARATOR>')[1:3]
                     if ack_filename == os.path.basename(filename) and ack_user_id == user_id:
-                        print(ack_filename)
-                        print(filename)
+                        file = open(ack_file_path, 'r').readlines()
+                        file = [f.strip() for f in file]
+                        if (ack_user_id not in file):
+                            with open(ack_file_path, 'a') as ack_file:
+                                ack_file.write(f"{user_id}\n")
 
-                        with open(f"{filename}_acknowledgments.txt", 'a') as ack_file:
-                            ack_file.write(f"{user_id}\n")
                         print(f"[+] Received final acknowledgment from user {user_id} for file {filename}.")
                         break
+
         except socket.timeout:
             print(f"[-] Timeout while waiting for final acknowledgment from user {user_id}.")
         except Exception as e:
@@ -258,7 +287,7 @@ def send_file(filename, group_ip, user_ids, post_transfer_command=None):
         sock.sendto(command_info.encode('utf-8'), (group_ip, SERVER_PORT))
 
 
-def start_sending(selected_files, selected_group, post_transfer_command):
+def start_sending(selected_files, selected_group, post_transfer_command, schedule_time):
     if not selected_files:
         messagebox.showwarning("No Files Selected", "Please select at least one file.")
         return
@@ -267,6 +296,23 @@ def start_sending(selected_files, selected_group, post_transfer_command):
         messagebox.showwarning("No Group Selected", "Please select a group.")
         return
 
+    # Check if a valid schedule time is set
+    if schedule_time:
+        now = datetime.now()
+        scheduled_datetime = datetime.combine(now.date(), schedule_time)
+
+        if scheduled_datetime < now:
+            messagebox.showwarning("Invalid Schedule Time",
+                                   "The scheduled time is in the past. File transfer will not execute.")
+            return
+
+        delay_seconds = (scheduled_datetime - now).total_seconds()
+
+        if delay_seconds > 0:
+            messagebox.showinfo("Scheduled", f"File transfer scheduled to start at {schedule_time}. Waiting...")
+            time.sleep(delay_seconds)
+
+    # Proceed with file sending
     connection = connect_to_database()
     if connection:
         cursor = connection.cursor()
@@ -287,11 +333,76 @@ def start_sending(selected_files, selected_group, post_transfer_command):
 
             print(send_list)
 
+            if not os.path.exists(f"{selected_group.replace(' ', '_')}_sent_files.txt"):
+                with open(f"{selected_group.replace(' ', '_')}_sent_files.txt", 'w') as ack_file:
+                    ack_file.write("")
+
             for file in selected_files:
+                with open(f"{selected_group.replace(' ', '_')}_sent_files.txt", 'a') as ack_file:
+                    ack_file.write(f"{file}\n")
                 send_file(file, group_ip, send_list, post_transfer_command)
         else:
             messagebox.showerror("Error", "Selected group not found in the database.")
         connection.close()
+
+
+def update_required(group_name, user_id):
+    if not os.path.exists(f"{group_name.replace(' ', '_')}_sent_files.txt"):
+        return False
+
+    # groups = fetch_groups()
+    with open(f"{group_name.replace(' ', '_')}_sent_files.txt", 'r') as f:
+        sent_files = f.readlines()
+        sent_files = [file.replace("\n", "") for file in sent_files]
+        send_file = 0
+        for file in sent_files:
+            if not os.path.exists(f"{file}_acknowledgments.txt"):
+                send_file += 1
+                continue
+
+            with open(f"{file}_acknowledgments.txt", 'r') as id:
+
+                ids = id.readlines()
+                ids = [i.strip() for i in ids]
+
+                if user_id not in ids:
+                    send_file += 1
+
+        if send_file != 0:
+            return True
+        else:
+            return False
+
+
+def send_previous_files(group_name, user_id):
+    # if not os.path.exists(f"{group_name.replace(' ', '_')}_sent_files.txt"):
+    #     return None
+    print("Previous files are being sent")
+    previous_files = []
+    groups = fetch_groups()
+    with open(f"{group_name.replace(' ', '_')}_sent_files.txt", 'r') as f:
+        sent_files = f.readlines()
+        # print(sent_files)
+        sent_files = [file.replace("\n", "") for file in sent_files]
+        for file in sent_files:
+
+            if not os.path.exists(f"{file}_acknowledgments.txt"):
+                previous_files.append(file)
+                continue
+
+            with open(f"{file}_acknowledgments.txt", 'r') as id:
+
+                ids = id.readlines()
+                ids = [i.strip() for i in ids]
+                if user_id not in ids:
+                    previous_files.append(file)
+
+    print(previous_files)
+    if len(previous_files) > 0:
+        for f in previous_files:
+            print(f"Sending file {f}")
+            # threading.Thread(target=send_file, args=(f, groups[group_name], [user_id])).start()
+            send_file(f, groups[group_name], [user_id])
 
 
 # Function to open the file dialog and select files
@@ -336,7 +447,6 @@ def update_group_menu():
 def create_gui():
     global group_menu  # Declare as global to use in update_group_menu()
     global selected_group_var  # Declare as global to use in update_group_menu()
-    global progress_bar
 
     root = tk.Tk()
     root.title("File Sharing System")
@@ -380,6 +490,54 @@ def create_gui():
 
     update_group_menu()  # Initial call to populate the dropdown
 
+    # Time scheduling frame
+    schedule_frame = tk.Frame(root, padx=10, pady=10)
+    schedule_frame.pack(pady=10)
+
+    tk.Label(schedule_frame, text="Set Transfer Start Time (HH:MM:SS):", font=custom_font).pack()
+
+    send_time_set = False  # Local variable to track if the time has been set
+
+    time_frame = tk.Frame(schedule_frame)
+    time_frame.pack()
+
+    current_time = datetime.now()
+    formatted_time = current_time.strftime("%H:%M:%S")
+
+    hour_var = tk.StringVar(value=formatted_time.split(":")[0])
+    min_var = tk.StringVar(value=formatted_time.split(":")[1])
+    sec_var = tk.StringVar(value=formatted_time.split(":")[2])
+
+    hour_entry = tk.Entry(time_frame, textvariable=hour_var, width=3, font=custom_font)
+    hour_entry.pack(side=tk.LEFT)
+    tk.Label(time_frame, text=":", font=custom_font).pack(side=tk.LEFT)
+
+    min_entry = tk.Entry(time_frame, textvariable=min_var, width=3, font=custom_font)
+    min_entry.pack(side=tk.LEFT)
+    tk.Label(time_frame, text=":", font=custom_font).pack(side=tk.LEFT)
+
+    sec_entry = tk.Entry(time_frame, textvariable=sec_var, width=3, font=custom_font)
+    sec_entry.pack(side=tk.LEFT)
+
+    def set_time():
+        nonlocal send_time_set
+        send_time_set = True
+        messagebox.showinfo("Time Set", "Send time has been set.")
+        return send_time_set
+
+    set_send_time = tk.Button(time_frame, text="Set Send Time", font=custom_font, command=set_time)
+    set_send_time.pack(pady=5)
+
+    def get_schedule_time():
+        try:
+            if send_time_set:
+                return datetime.strptime(f"{hour_var.get()}:{min_var.get()}:{sec_var.get()}", "%H:%M:%S").time()
+            else:
+                return None
+        except ValueError:
+            messagebox.showerror("Invalid Time", "Please enter a valid time.")
+            return None
+
     # Post-transfer command frame
     command_frame = tk.Frame(root, padx=10, pady=10)
     command_frame.pack(pady=10)
@@ -394,7 +552,8 @@ def create_gui():
 
     # Button to start sending files
     send_btn = tk.Button(root, text="Send Files", font=custom_font,
-                         command=lambda: start_sending(selected_files, selected_group_var.get(), command_entry.get()))
+                         command=lambda: start_sending(selected_files, selected_group_var.get(), command_entry.get(),
+                                                       get_schedule_time()))
     send_btn.pack(pady=10)
 
     root.mainloop()
