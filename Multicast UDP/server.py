@@ -400,6 +400,6 @@ def create_gui():
     root.mainloop()
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     threading.Thread(target=handle_user_requests).start()  # Start the thread to handle user requests
     create_gui()

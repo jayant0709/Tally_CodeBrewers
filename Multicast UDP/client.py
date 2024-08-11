@@ -310,5 +310,5 @@ def start_receiving(selected_group, groups):
     receive_file(group_ip, user_id)
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     create_gui()
