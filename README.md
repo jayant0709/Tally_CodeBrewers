@@ -1,7 +1,7 @@
 ## Step 1: Initial Setup
 
 1.Run the Server and Client Code:
-2.Ensure that the server and client code are executed on their respective devices. Both codes must be connected to a common database for successful operation.
+Ensure that the server and client code are executed on their respective devices. Both codes must be connected to a common database for successful operation.
 
 ## Step 2: Group Creation and Setup (Admin)
 
