@@ -9,7 +9,7 @@ import mysql.connector
 
 SERVER_PORT = 5002
 BUFFER_SIZE = 1024
-SERVER_IP = '192.168.0.101'
+SERVER_IP = '127.0.0.1'
 
 
 def connect_to_database():
@@ -17,7 +17,7 @@ def connect_to_database():
         connection = mysql.connector.connect(
             host="localhost",
             user="root",  # Replace with your MySQL username
-            password="Jayantpatil@07",  # Replace with your MySQL password
+            password="manglesh2004",  # Replace with your MySQL password
             database="FileSharingDB"  # Replace with your MySQL database name
         )
         return connection
@@ -106,15 +106,11 @@ def join_multicast_group(user_id, group_name):
         return None
 
 
-def receive_file(multicast_group):
+def receive_file(multicast_group, user_id):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(('', SERVER_PORT))
-        # sock.bind(('', 5001))
-
-        port_number = sock.getsockname()[1]
-        print(f"[+] Connected to port: {port_number}")
 
         mreq = struct.pack("4sl", socket.inet_aton(multicast_group), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
@@ -134,40 +130,62 @@ def receive_file(multicast_group):
 
         print(f"[+] Receiving file: {filename} with size: {filesize} bytes")
 
-        received_packets = {}
+        # received_packets = {}
         total_bytes_received = 0
 
         progress_bar = tqdm(total=filesize, unit='B', unit_scale=True, desc="Receiving")
 
-        # File size check
-        while total_bytes_received < filesize:
-            data, address = sock.recvfrom(BUFFER_SIZE + 36)
-            seq_number = struct.unpack('I', data[:4])[0]
-            checksum_received = data[4:36].decode()
-            file_data = data[36:]
+        # # File size check
+        # while total_bytes_received < filesize:
+        #     data, address = sock.recvfrom(BUFFER_SIZE + 36 + len(user_id))
+        #     seq_number = struct.unpack('I', data[:4])[0]
+        #     checksum_received = data[4:36].decode()
+        #     received_user_id = data[36:36 + len(user_id)].strip().decode()
+        #     file_data = data[36 + len(user_id):]
 
-            checksum_calculated = hashlib.md5(file_data).hexdigest()
-            if checksum_received == checksum_calculated:
-                received_packets[seq_number] = file_data
-                total_bytes_received += len(file_data)
+        #     checksum_calculated = hashlib.md5(file_data).hexdigest()
+        #     if checksum_received == checksum_calculated and received_user_id == user_id:
+        #         received_packets[seq_number] = file_data
+        #         total_bytes_received += len(file_data)
 
-                progress_bar.update(len(file_data))
+        #         progress_bar.update(len(file_data))
 
-                ack_packet = struct.pack('I', seq_number)
-                sock.sendto(ack_packet, address)
+        #         ack_packet = struct.pack('I', seq_number) + user_id.encode().ljust(36)  # Adjust size if necessary
+        #         sock.sendto(ack_packet, address)
+
+        with open(filename, 'wb') as f:
+            while total_bytes_received < filesize:
+                data, address = sock.recvfrom(BUFFER_SIZE + 36 + len(user_id))
+                seq_number = struct.unpack('I', data[:4])[0]
+                checksum_received = data[4:36].decode()
+                received_user_id = data[36:36 + len(user_id)].strip().decode()
+                file_data = data[36 + len(user_id):]
+
+                checksum_calculated = hashlib.md5(file_data).hexdigest()
+                if checksum_received == checksum_calculated and received_user_id == user_id:
+                    f.write(file_data)
+                    total_bytes_received += len(file_data)
+                    progress_bar.update(len(file_data))
+
+                    ack_packet = struct.pack('I', seq_number)
+                    sock.sendto(ack_packet, address)
 
         progress_bar.close()
 
-        reassemble_bar = tqdm(total=len(received_packets), unit='packet', desc="Reassembling")
+        # reassemble_bar = tqdm(total=len(received_packets), unit='packet', desc="Reassembling")
 
-        with open(filename, 'wb') as f:
-            for seq_num in sorted(received_packets.keys()):
-                f.write(received_packets[seq_num])
-                reassemble_bar.update(1)
+        # with open(filename, 'wb') as f:
+        #     for seq_num in sorted(received_packets.keys()):
+        #         f.write(received_packets[seq_num])
+        #         reassemble_bar.update(1)
 
-        reassemble_bar.close()
+        # reassemble_bar.close()
 
         print(f"[+] File {filename} received successfully.")
+
+        # Send final acknowledgment with user ID and filename
+        final_ack = f"ACK_COMPLETE<SEPARATOR>{user_id}<SEPARATOR>{filename}"
+        sock.sendto(final_ack.encode('utf-8'), address)
 
         # Wait for post-transfer command
         try:
@@ -289,8 +307,8 @@ def start_receiving(selected_group, groups):
     # print(groups)
     group_ip = groups[selected_group]
     # print(group_ip)
-    receive_file(group_ip)
+    receive_file(group_ip, user_id)
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     create_gui()
